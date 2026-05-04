@@ -87,7 +87,8 @@ body.has-bg.dark .btn-secondary,
 body.has-bg.dark .popover {
   background-color: rgba(20, 22, 28, 0.7);
 }
-body.has-bg .sidebar, body.has-bg .main { position: relative; z-index: 1; }
+body.has-bg .main { position: relative; z-index: 1; }
+body.has-bg .sidebar { z-index: 1; }
 
 svg { width: 16px; height: 16px; flex-shrink: 0; }
 
@@ -98,8 +99,14 @@ svg { width: 16px; height: 16px; flex-shrink: 0; }
   display: flex;
   flex-direction: column;
   padding: 18px 14px;
-  position: sticky; top: 0;
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 232px;
   height: 100vh;
+  max-height: none;
+  z-index: 2;
 }
 .brand {
   display: flex; align-items: center; gap: 10px;
@@ -259,7 +266,7 @@ svg { width: 16px; height: 16px; flex-shrink: 0; }
 }
 
 /* ----------------------------- main ----------------------------- */
-.main { display: flex; flex-direction: column; min-width: 0; }
+.main { grid-column: 2; display: flex; flex-direction: column; min-width: 0; }
 .topbar {
   height: 52px;
   border-bottom: 1px solid var(--border);
@@ -977,4 +984,206 @@ input[type="range"]::-webkit-slider-thumb {
   z-index: 50;
 }
 .toast.show { opacity: 1; }
+
+/* ----- save target segmented control ----- */
+.save-target {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+}
+.save-target-btn {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--text-soft);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.save-target-btn svg {
+  width: 16px; height: 16px;
+}
+.save-target-btn:hover { color: var(--text); }
+.save-target-btn.active {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-sm);
+}
+.save-target-btn.active svg { color: var(--primary); }
+.save-target-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-mute);
+}
+.save-target-hint.warn { color: var(--warning); }
+.hosted-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0 14px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.hosted-mode-copy {
+  min-width: 0;
+}
+.hosted-mode-copy label {
+  font-size: 12px;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+.hosted-mode-row .save-target-hint {
+  margin-top: 4px;
+}
+.hosted-mode-row .toggle {
+  flex: 0 0 auto;
+}
+
+/* ----- mobile mode card extras ----- */
+.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+#mobile-url-display {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+#mobile-url-display.off { color: var(--text-mute); }
+#mobile-url-display.on  { color: var(--primary); border-color: var(--primary-soft-2); background: var(--primary-soft); }
+
+/* =========================================================================
+   Mobile responsive overrides — the desktop layout assumes ≥1080px wide.
+   On a phone we collapse sidebar to a top nav bar, single-column content,
+   and shrink form grids. Triggered for typical phone widths.
+   ========================================================================= */
+@media (max-width: 768px) {
+  body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  /* sidebar -> top strip with horizontal nav */
+  .sidebar {
+    position: sticky; top: 0; left: auto; bottom: auto; z-index: 5;
+    width: auto;
+    height: auto;
+    padding: 8px 10px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    flex-direction: column;
+    gap: 6px;
+  }
+  .brand { padding: 4px 4px 4px; }
+  .brand-name { font-size: 14px; }
+  .nav {
+    flex-direction: row;
+    gap: 4px;
+    margin-top: 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav-item {
+    flex: 0 0 auto;
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+  .sidebar-footer { display: none; }
+
+  /* topbar: switch from grid to flex so the mode-switch can wrap onto a
+     dedicated second row instead of being crushed between status & actions. */
+  .topbar {
+    display: flex;
+    flex-wrap: wrap;
+    height: auto;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+  }
+  .topbar-status  { order: 1; flex: 1 1 auto; min-width: 0; }
+  .topbar-actions { order: 2; flex: 0 0 auto; margin-left: auto; }
+  .mode-switch    { order: 3; flex: 1 1 100%; justify-content: center; }
+  .mode-btn       { height: 34px; padding: 0 22px; font-size: 13px; }
+  .mode-btn span  { white-space: nowrap; }
+
+  /* main content: single column */
+  .content {
+    grid-template-columns: 1fr;
+    padding: 14px 14px 8px;
+    gap: 14px;
+  }
+  .page-title { font-size: 18px; }
+  .page-sub   { font-size: 12px; margin-bottom: 12px; }
+
+  /* params grid: 2 columns instead of 4 */
+  .grid-4 {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    padding: 10px 12px;
+  }
+
+  /* save-target buttons stay 3-up but tighter */
+  .save-target-btn {
+    padding: 10px 4px;
+    font-size: 12px;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  /* primary actions stack full-width for thumb reach */
+  .actions { flex-wrap: wrap; gap: 8px; }
+  .actions > button { flex: 1 1 100%; }
+
+  /* view-head (gallery/history/etc) wraps */
+  .view-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .view-head-actions { flex-wrap: wrap; gap: 8px; }
+  .view-head-actions > * { flex: 1 1 auto; }
+
+  .history { padding: 8px 14px 24px; }
+  .content-block { padding: 8px 14px 24px; }
+  .history-strip { gap: 8px; }
+  .thumb { min-width: 140px; }
+
+  /* gallery 2-up; models/settings 1-up */
+  .gallery-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .models-grid,
+  .settings-grid { grid-template-columns: 1fr; }
+
+  /* preview frame still tall enough to be useful */
+  .preview-frame { min-height: 240px; }
+
+  /* Backend status popover doesn't make sense on mobile (sidebar-footer hidden);
+     setting card still controls it. */
+  .popover { display: none !important; }
+
+  /* lightbox: full screen */
+  .lightbox-img { max-width: 100vw; max-height: 70vh; }
+  .lightbox-panel { padding: 12px; }
+
+  /* log table — let it scroll horizontally instead of squeezing */
+  .log-table-wrap { overflow-x: auto; }
+  .log-table { min-width: 720px; }
+}
+
+/* very narrow phones — drop params grid to 1 column */
+@media (max-width: 420px) {
+  .grid-4 { grid-template-columns: 1fr; }
+  .gallery-grid { grid-template-columns: 1fr; }
+  .save-target-btn span { font-size: 11px; }
+}
 

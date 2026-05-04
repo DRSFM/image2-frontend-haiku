@@ -11,3 +11,5 @@ coverage/
 
 *.log
 *.tmp
+*.pid
+preview-server.*

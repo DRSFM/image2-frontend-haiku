@@ -54,6 +54,13 @@
     refSize: $("ref-size"),
     btnRemoveRef: $("btn-remove-ref"),
     btnGenerateLabel: document.querySelector("#btn-generate span"),
+    saveTarget: $("save-target"),
+    saveTargetHint: $("save-target-hint"),
+    saveTargetBtns: document.querySelectorAll(".save-target-btn"),
+    hostedMode: $("hosted-mode"),
+    stHostedMode: $("st-hosted-mode"),
+    hostedModeHint: $("hosted-mode-hint"),
+    stHostedModeHint: $("st-hosted-mode-hint"),
   };
 
   const MAX_REF_BYTES = 20 * 1024 * 1024;
@@ -64,6 +71,17 @@
   let refObjectUrl = null;   // blob URL for the thumbnail preview
   let mode = "text";         // "text" | "edit"
   let autoOptimize = false;  // mirrored from settings
+  let saveTarget = "pc";     // "pc" | "phone" | "both"
+  let hostedMode = false;    // submit text-to-image work to the PC backend
+  let hostedPollTimer = null;
+  const SAVE_TARGET_KEY = "image2.saveTarget";
+  const HOSTED_MODE_KEY = "image2.hostedMode";
+  const ACTIVE_TASK_KEY = "image2.activeTaskId";
+  const SAVE_TARGET_HINTS = {
+    pc:    "写入电脑保存目录，不触发手机下载。",
+    phone: "不写入电脑磁盘；图片直接由浏览器下载到当前设备（手机相册 / 下载目录）。",
+    both:  "写入电脑保存目录，同时由浏览器下载到当前设备。",
+  };
 
   function showToast(msg) {
     els.toast.textContent = msg;
@@ -124,7 +142,7 @@
         setBackend("bad", "Backend 未启动");
         els.statusSub.textContent = "请先启动 Backend 服务";
       } else if (!j.credential_loaded) {
-        setBackend("bad", "API Key 未加载");
+        setBackend("bad", "凭据未加载");
         els.statusSub.textContent = j.credential_error || "凭据配置读取失败";
       }
     } catch (e) {
@@ -187,6 +205,125 @@
       : "—";
     els.metaState.textContent = info.saved ? "保存成功" : "完成";
     els.metaStatePill.classList.add("ok-pill");
+  }
+
+  function setActiveTaskId(taskId) {
+    try {
+      if (taskId) localStorage.setItem(ACTIVE_TASK_KEY, taskId);
+      else localStorage.removeItem(ACTIVE_TASK_KEY);
+    } catch {}
+  }
+
+  function setHostedMode(on) {
+    hostedMode = !!on;
+    if (els.hostedMode) els.hostedMode.checked = hostedMode;
+    if (els.stHostedMode) els.stHostedMode.checked = hostedMode;
+    const textModeHint = hostedMode
+      ? "后台生成并写入电脑图库，手机回来后自动同步。"
+      : "关闭后沿用当前页面等待返回的生成方式。";
+    const editModeHint = "图生图暂走直接生成；托管先用于文生图。";
+    const workbenchHint = mode === "edit" && hostedMode ? editModeHint : textModeHint;
+    if (els.hostedModeHint) {
+      els.hostedModeHint.textContent = workbenchHint;
+      els.hostedModeHint.classList.toggle("warn", hostedMode && mode === "edit");
+    }
+    if (els.stHostedModeHint) {
+      els.stHostedModeHint.textContent = hostedMode
+        ? "手机提交文生图后可以切后台或锁屏，电脑端继续生成。"
+        : "关闭后手机端生成时需要停留在页面等待返回。";
+    }
+    try { localStorage.setItem(HOSTED_MODE_KEY, hostedMode ? "1" : "0"); } catch {}
+  }
+
+  function renderHostedWaiting(task) {
+    const request = (task && task.request) || {};
+    const n = request.n || 1;
+    const state = task && task.status === "running" ? "运行中" : "排队中";
+    els.previewFrame.classList.add("loading");
+    els.previewFrame.innerHTML = `<div class="preview-empty">任务已托管到电脑后台 · ${state}</div>`;
+    els.metaFilename.textContent = task && task.id ? `task:${String(task.id).slice(0, 8)}` : "托管任务";
+    els.metaDim.textContent = request.size || "—";
+    els.metaTime.textContent = "—";
+    els.metaState.textContent = n > 1 ? `托管中 (${n} 张)` : "托管中";
+    els.metaStatePill.classList.remove("ok-pill");
+    els.hint.className = "hint ok";
+    els.hint.textContent = "任务已交给电脑后台处理，手机可以切后台或锁屏。";
+  }
+
+  function renderHostedError(task) {
+    const payload = (task && task.error) || { error: "托管任务失败" };
+    const box = document.createElement("div");
+    box.className = "preview-empty error-detail";
+    box.textContent = `托管生成失败：\n${formatApiError(payload, payload.upstream_status || 500)}`;
+    els.previewFrame.classList.remove("loading");
+    els.previewFrame.replaceChildren(box);
+    els.metaState.textContent = "失败";
+    els.metaStatePill.classList.remove("ok-pill");
+    els.hint.className = "hint err";
+    els.hint.textContent = "托管任务失败，错误已从电脑端同步。";
+  }
+
+  function renderHostedResult(task) {
+    const result = (task && task.result) || {};
+    const items = result.items || [];
+    const head = items[0] || result;
+    if (head && head.url) {
+      renderPreview({
+        url: head.url,
+        filename: head.filename || result.filename,
+        width: head.width || result.width,
+        height: head.height || result.height,
+        elapsed_ms: result.elapsed_ms,
+        saved: true,
+      });
+    }
+    const count = items.length || 1;
+    els.hint.className = "hint ok";
+    els.hint.textContent = count > 1 ? `托管完成：${count} 张已同步到图库` : "托管完成：已同步到图库";
+    loadHistory();
+    loadGallery();
+  }
+
+  async function pollHostedTask(taskId) {
+    if (!taskId) return;
+    clearTimeout(hostedPollTimer);
+    try {
+      const r = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (r.status === 404) {
+          setActiveTaskId(null);
+          els.hint.className = "hint err";
+          els.hint.textContent = "托管任务不存在，已停止恢复轮询。";
+          return;
+        }
+        throw new Error(formatApiError(j, r.status));
+      }
+      const task = j.task || {};
+      if (task.status === "succeeded") {
+        setActiveTaskId(null);
+        renderHostedResult(task);
+        showToast("托管任务已完成");
+        return;
+      }
+      if (task.status === "failed" || task.status === "canceled") {
+        setActiveTaskId(null);
+        renderHostedError(task);
+        return;
+      }
+      renderHostedWaiting(task);
+      hostedPollTimer = setTimeout(() => pollHostedTask(taskId), 3000);
+    } catch (e) {
+      els.hint.className = "hint err";
+      els.hint.textContent = `托管状态同步失败：${e.message}`;
+      hostedPollTimer = setTimeout(() => pollHostedTask(taskId), 6000);
+    }
+  }
+
+  function resumeHostedTask() {
+    let taskId = "";
+    try { taskId = localStorage.getItem(ACTIVE_TASK_KEY) || ""; } catch {}
+    if (taskId) pollHostedTask(taskId);
   }
 
   function formatApiError(payload, fallbackStatus) {
@@ -276,6 +413,7 @@
       // The edit endpoint returns one image per call regardless of n
       els.batch.disabled = true;
     }
+    setHostedMode(hostedMode);
     updateGenerateLabel();
   }
 
@@ -344,8 +482,48 @@
     els.metaState.textContent = isEdit ? "编辑中…" : "生成中…";
     els.metaStatePill.classList.remove("ok-pill");
 
+    const targetNow  = saveTarget;          // freeze for this request
+    const writeDisk  = targetNow !== "phone";
+    const wantB64    = targetNow !== "pc";
+    const hostedNow  = hostedMode && !isEdit;
+
     let lastErrorPayload = null;
     try {
+      if (hostedNow) {
+        els.hint.textContent = "正在提交托管任务…";
+        const resp = await fetch("/api/tasks/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            size: els.size.value,
+            quality: els.quality.value,
+            output_format: els.format.value,
+            n,
+            save_to_disk: true,
+            include_b64: false,
+          }),
+        });
+        const raw = await resp.text();
+        let j;
+        try {
+          j = raw ? JSON.parse(raw) : {};
+        } catch {
+          j = { error: raw || `HTTP ${resp.status}`, detail: raw };
+        }
+        if (!resp.ok) {
+          lastErrorPayload = j;
+          throw new Error(formatApiError(j, resp.status));
+        }
+        const task = j.task || {};
+        const taskId = j.task_id || task.id;
+        if (!taskId) throw new Error("后台未返回 task_id");
+        setActiveTaskId(taskId);
+        renderHostedWaiting({ ...task, id: taskId, request: { size: els.size.value, n } });
+        pollHostedTask(taskId);
+        return;
+      }
+
       let resp;
       if (isEdit) {
         const fd = new FormData();
@@ -354,6 +532,8 @@
         fd.append("quality", els.quality.value);
         fd.append("output_format", els.format.value);
         fd.append("image", refFile, refFile.name);
+        fd.append("save_to_disk", writeDisk ? "1" : "0");
+        fd.append("include_b64",  wantB64   ? "1" : "0");
         resp = await fetch("/api/edit", { method: "POST", body: fd });
       } else {
         resp = await fetch("/api/generate", {
@@ -365,6 +545,8 @@
             quality: els.quality.value,
             output_format: els.format.value,
             n,
+            save_to_disk: writeDisk,
+            include_b64: wantB64,
           }),
         });
       }
@@ -380,25 +562,52 @@
         throw new Error(formatApiError(j, resp.status));
       }
 
+      const items = j.items || [];
+      const head  = items[0] || j;
+      // For phone-only mode the server returned no /api/image URL — build a
+      // blob URL from the inline b64 so the preview pane still works.
+      let previewUrl = head.url || j.url || null;
+      let previewBlobUrl = null;
+      if (!previewUrl && head.b64_json) {
+        const blob = b64ToBlob(head.b64_json, head.mime || "image/png");
+        previewBlobUrl = URL.createObjectURL(blob);
+        previewUrl = previewBlobUrl;
+      }
       renderPreview({
-        url: j.url,
-        filename: j.filename,
-        width: j.width,
-        height: j.height,
+        url: previewUrl,
+        filename: head.filename || j.filename,
+        width:    head.width    || j.width,
+        height:   head.height   || j.height,
         elapsed_ms: j.elapsed_ms,
-        saved: true,
+        saved: writeDisk,
       });
+
+      // Download to the current device when phone-side save is requested.
+      if (wantB64) {
+        const triggered = downloadItemsToPhone(items.length ? items : [head]);
+        if (triggered) showToast(triggered > 1 ? `已触发 ${triggered} 张下载` : "已触发下载");
+      }
+
       els.hint.className = "hint ok";
-      const count = (j.items || []).length || 1;
-      const dir = j.saved_to ? j.saved_to.split("\\").slice(0, -1).join("\\") : "";
-      const tag = isEdit ? "图生图完成" : (count > 1 ? `成功生成 ${count} 张` : "保存成功");
-      els.hint.textContent = isEdit
-        ? `${tag} → ${j.saved_to || dir}`
-        : (count > 1 ? `${tag} → ${dir}` : `${tag} → ${j.saved_to}`);
-      loadHistory();
+      const count = items.length || 1;
+      const dir = head.saved_to ? head.saved_to.split("\\").slice(0, -1).join("\\") : "";
+      let tag;
+      if (targetNow === "phone")     tag = isEdit ? "图生图完成 · 已下载到当前设备" : (count > 1 ? `${count} 张已下载到当前设备` : "已下载到当前设备");
+      else if (targetNow === "both") tag = isEdit ? "图生图完成 · 电脑+当前设备" : (count > 1 ? `${count} 张：电脑+当前设备` : "已保存：电脑+当前设备");
+      else                            tag = isEdit ? "图生图完成" : (count > 1 ? `成功生成 ${count} 张` : "保存成功");
+      if (writeDisk) {
+        els.hint.textContent = isEdit
+          ? `${tag} → ${head.saved_to || dir}`
+          : (count > 1 ? `${tag} → ${dir}` : `${tag} → ${head.saved_to || ""}`);
+      } else {
+        els.hint.textContent = `${tag}（未写入电脑磁盘）`;
+      }
+
+      // History strip and gallery only see images that hit disk.
+      if (writeDisk) loadHistory();
       // refresh prefs in case user changed auto-open between launches
       try { userPrefs = await fetch("/api/settings").then(r => r.json()); } catch {}
-      if (userPrefs && userPrefs.auto_open_folder_on_save) {
+      if (writeDisk && userPrefs && userPrefs.auto_open_folder_on_save) {
         fetch("/api/open-folder", { method: "POST" });
       }
     } catch (e) {
@@ -1153,11 +1362,182 @@
     }
   });
 
+  // ---- save-target selector (workbench) ----
+  function applySaveTarget(t) {
+    saveTarget = (t === "phone" || t === "both") ? t : "pc";
+    for (const b of els.saveTargetBtns) {
+      const active = b.dataset.target === saveTarget;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-checked", active ? "true" : "false");
+    }
+    if (els.saveTargetHint) {
+      els.saveTargetHint.textContent = SAVE_TARGET_HINTS[saveTarget];
+      els.saveTargetHint.classList.toggle("warn", saveTarget === "phone");
+    }
+    try { localStorage.setItem(SAVE_TARGET_KEY, saveTarget); } catch {}
+  }
+  for (const b of els.saveTargetBtns) {
+    b.addEventListener("click", () => applySaveTarget(b.dataset.target));
+  }
+  applySaveTarget(localStorage.getItem(SAVE_TARGET_KEY) || "pc");
+
+  if (els.hostedMode) {
+    els.hostedMode.addEventListener("change", (e) => setHostedMode(e.target.checked));
+  }
+  if (els.stHostedMode) {
+    els.stHostedMode.addEventListener("change", (e) => setHostedMode(e.target.checked));
+  }
+  let storedHosted = "";
+  try { storedHosted = localStorage.getItem(HOSTED_MODE_KEY) || ""; } catch {}
+  setHostedMode(storedHosted === "1");
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) resumeHostedTask();
+  });
+  window.addEventListener("focus", resumeHostedTask);
+
+  // ---- phone download helper ----
+  // Decode b64 → Blob → trigger an <a download> click. Works on Chrome/Firefox
+  // on Android out of the box. iOS Safari may instead open the image inline;
+  // long-press → "Save to Photos" still works as a fallback.
+  function b64ToBlob(b64, mime) {
+    const bin = atob(b64);
+    const len = bin.length;
+    const arr = new Uint8Array(len);
+    for (let i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type: mime || "application/octet-stream" });
+  }
+  function triggerPhoneDownload(b64, mime, filename) {
+    const blob = b64ToBlob(b64, mime);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "image.png";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+  }
+  function downloadItemsToPhone(items) {
+    if (!items || !items.length) return 0;
+    let triggered = 0;
+    items.forEach((it, i) => {
+      if (!it || !it.b64_json) return;
+      // Stagger so iOS doesn't squash the second download.
+      setTimeout(
+        () => triggerPhoneDownload(it.b64_json, it.mime, it.filename),
+        i * 350
+      );
+      triggered++;
+    });
+    return triggered;
+  }
+  // Expose so generate() (declared earlier in this IIFE) can call back.
+  window.__image2 = window.__image2 || {};
+  window.__image2.saveTarget = () => saveTarget;
+  window.__image2.downloadItemsToPhone = downloadItemsToPhone;
+
+  // ---- mobile mode card ----
+  async function refreshMobileCard() {
+    const enabledChk = $("st-mobile-enabled");
+    const urlEl      = $("mobile-url-display");
+    const protoEl    = $("mobile-proto");
+    const dnsEl      = $("mobile-dns");
+    if (!enabledChk || !urlEl) return;
+    try {
+      const r = await fetch("/api/mobile/status");
+      const j = await r.json();
+      enabledChk.checked = !!j.enabled;
+      urlEl.classList.toggle("on", !!j.enabled && !!j.url);
+      urlEl.classList.toggle("off", !j.enabled || !j.url);
+      urlEl.textContent = j.url || (j.tailscale_available ? "未启用" : "未检测到 Tailscale 客户端");
+      protoEl.textContent = j.proto ? j.proto.toUpperCase() : "—";
+      dnsEl.textContent   = j.dns_name || "—";
+      enabledChk.disabled = !j.tailscale_available;
+    } catch (e) {
+      urlEl.textContent = "状态查询失败";
+      urlEl.classList.add("off");
+      urlEl.classList.remove("on");
+    }
+  }
+  async function setMobileMode(on) {
+    const urlEl = $("mobile-url-display");
+    if (urlEl) {
+      urlEl.textContent = on ? "正在发布到 tailnet…" : "正在停止…";
+      urlEl.classList.remove("on"); urlEl.classList.add("off");
+    }
+    try {
+      const r = await fetch(on ? "/api/mobile/start" : "/api/mobile/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: on ? JSON.stringify({ prefer_https: true }) : null,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        showToast(`手机模式${on ? "启动" : "停止"}失败：${j.error || r.status}`);
+      } else if (on) {
+        showToast(j.warning || `手机模式已启动 · ${j.proto.toUpperCase()}`);
+      } else {
+        showToast("手机模式已停止");
+      }
+    } catch (e) {
+      showToast(`手机模式${on ? "启动" : "停止"}异常：${e.message}`);
+    } finally {
+      refreshMobileCard();
+    }
+  }
+  const mobileEnabledChk = $("st-mobile-enabled");
+  if (mobileEnabledChk) {
+    mobileEnabledChk.addEventListener("change", (e) => setMobileMode(e.target.checked));
+  }
+  const btnMobileCopy = $("btn-mobile-copy");
+  if (btnMobileCopy) {
+    btnMobileCopy.addEventListener("click", async () => {
+      const text = ($("mobile-url-display").textContent || "").trim();
+      if (!text || !/^https?:/.test(text)) { showToast("当前没有可复制的地址"); return; }
+      try { await navigator.clipboard.writeText(text); showToast("已复制访问地址"); }
+      catch { showToast("复制失败"); }
+    });
+  }
+  const btnMobileOpen = $("btn-mobile-open");
+  if (btnMobileOpen) {
+    btnMobileOpen.addEventListener("click", () => {
+      const text = ($("mobile-url-display").textContent || "").trim();
+      if (!text || !/^https?:/.test(text)) { showToast("尚未启用手机模式"); return; }
+      window.open(text, "_blank", "noopener");
+    });
+  }
+  const btnMobileRestart = $("btn-mobile-restart");
+  if (btnMobileRestart) {
+    btnMobileRestart.addEventListener("click", async () => {
+      btnMobileRestart.disabled = true;
+      try {
+        await fetch("/api/mobile/stop", { method: "POST" });
+        await setMobileMode(true);
+      } finally {
+        btnMobileRestart.disabled = false;
+      }
+    });
+  }
+  // Refresh the mobile card whenever the settings tab is opened. We override
+  // the entry in the router map directly because VIEW_LOADERS captured the
+  // original function reference at construction time.
+  const _origLoadSettings = VIEW_LOADERS.settings;
+  VIEW_LOADERS.settings = async function() {
+    await _origLoadSettings.apply(this, arguments);
+    refreshMobileCard();
+  };
+
   loadBgFromSettings();
   loadStatus().then(loadHistory);
   loadSettingsIntoMenu();   // pull autoOptimize on startup
+  resumeHostedTask();
   setInterval(loadStatus, 10000);
+
+  if ("serviceWorker" in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
 })();
+
 
 
 
